@@ -1,7 +1,13 @@
-# Mi Movistar iOS Widget (Scriptable)
+# Mi Movistar iOS Widget (Scriptable) [NON-FUNCTIONAL / EXPERIMENTAL]
+
+> [!WARNING]
+> **Status: Non-Functional / Deprecated**  
+> Automated headless and webview session scraping for **Movistar México** (`mi.movistar.com.mx`) is currently **non-functional** due to strict Cloudflare Bot Management (`cf_clearance`), Google reCAPTCHA v3 score requirements, and session cookie validation that cannot be reliably maintained in iOS Scriptable widget timelines.
+>
+> This repository is preserved solely for educational, reverse-engineering, and cryptographic research purposes.
 
 [![iOS](https://img.shields.io/badge/iOS-16%2B-blue?logo=apple)](https://apps.apple.com/app/scriptable/id1405459188)
-[![Scriptable](https://img.shields.io/badge/Scriptable-Ready-brightgreen)](https://scriptable.app)
+[![Status](https://img.shields.io/badge/Status-Non--Functional-red)](https://github.com/rafavg77/movistar-widget-ios)
 [![Movistar](https://img.shields.io/badge/Carrier-Movistar%20M%C3%A9xico-00A9E0)](https://mi.movistar.com.mx)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
