@@ -149,6 +149,24 @@ test("AES-256-GCM encryption and decryption round-trip", async () => {
   assert.equal(decrypted, payload, "Decrypted payload should match original exactly");
 });
 
+function extractPid(input) {
+  if (!input) return null;
+  const match = input.match(/[?&]p_id=([^&#\s]+)/);
+  if (match) return decodeURIComponent(match[1]);
+  return input.trim();
+}
+
+test("extractPid extracts session token from URL or raw string", () => {
+  const url1 = "https://mi.movistar.com.mx/consumptions?p_id=AQIC5wM2LY4Sfcxy_TOKEN_ABC123";
+  assert.equal(extractPid(url1), "AQIC5wM2LY4Sfcxy_TOKEN_ABC123");
+
+  const url2 = "https://mi.movistar.com.mx/consumptions?foo=bar&p_id=TOKEN_456&baz=qux";
+  assert.equal(extractPid(url2), "TOKEN_456");
+
+  const raw = "TOKEN_789";
+  assert.equal(extractPid(raw), "TOKEN_789");
+});
+
 test("Parses Movistar consumption JSON correctly", () => {
   const mockPayload = {
     offering: "Movistar Libre 10GB",

@@ -87,87 +87,151 @@ async function main() {
 // AUTHENTICATION & KEYCHAIN MANAGEMENT
 // ============================================================================
 
+function extractPid(input) {
+  if (!input) return null;
+  const match = input.match(/[?&]p_id=([^&#\s]+)/);
+  if (match) return decodeURIComponent(match[1]);
+  return input.trim();
+}
+
 async function getOrPromptSession() {
+  // Check if token was passed via URL scheme (e.g. scriptable:///run?scriptName=Mi%20Movistar&p_id=...)
+  if (typeof args !== "undefined" && args.queryParameters) {
+    const qToken = args.queryParameters.p_id || args.queryParameters.token;
+    if (qToken) {
+      const clean = extractPid(qToken);
+      if (clean) {
+        Keychain.set("MOVISTAR_TOKEN", clean);
+        return clean;
+      }
+    }
+  }
+
   let token = Keychain.contains("MOVISTAR_TOKEN") ? Keychain.get("MOVISTAR_TOKEN") : CONFIG.token;
 
   if (!token && !config.runsInWidget) {
     const alert = new Alert();
     alert.title = "Mi Movistar Setup";
-    alert.message = "Movistar México protects logins with Google reCAPTCHA. Choose your preferred authentication method:";
-    alert.addAction("Web Login (Recommended)");
-    alert.addAction("Paste Session Token (p_id)");
+    alert.message = "To display your data consumption, the widget needs your Movistar session token. Choose how to sign in:";
+    alert.addAction("1. Web Login (In-App)");
+    alert.addAction("2. Paste URL from Safari (Fastest)");
+    alert.addAction("3. Test with Mock Data");
     alert.addCancelAction("Cancel");
 
     const choice = await alert.presentAlert();
     if (choice === 0) {
       token = await presentInteractiveLogin();
     } else if (choice === 1) {
-      const tokenPrompt = new Alert();
-      tokenPrompt.title = "Enter Session Token";
-      tokenPrompt.message = "Paste your 'p_id' session token from mi.movistar.com.mx:";
-      tokenPrompt.addTextField("Session token (p_id)", "");
-      tokenPrompt.addAction("Save");
-      tokenPrompt.addCancelAction("Cancel");
-      if ((await tokenPrompt.presentAlert()) === 0) {
-        token = tokenPrompt.textFieldValue(0).trim();
-        if (token) {
-          Keychain.set("MOVISTAR_TOKEN", token);
-        }
-      }
+      token = await promptPasteUrl();
+    } else if (choice === 2) {
+      CONFIG.useMockData = true;
+      return null;
     }
   }
 
   return token;
 }
 
+async function promptPasteUrl() {
+  const pasteAlert = new Alert();
+  pasteAlert.title = "Paste Safari URL";
+  pasteAlert.message = "If you already logged into Mi Movistar in Safari, copy the URL from Safari's address bar (it looks like https://mi.movistar.com.mx/consumptions?p_id=...) and paste it below:";
+  pasteAlert.addTextField("Paste URL or p_id here", "");
+  pasteAlert.addAction("Save");
+  pasteAlert.addCancelAction("Cancel");
+
+  if ((await pasteAlert.presentAlert()) === 0) {
+    const rawInput = pasteAlert.textFieldValue(0).trim();
+    const pid = extractPid(rawInput);
+    if (pid && pid.length > 10) {
+      Keychain.set("MOVISTAR_TOKEN", pid);
+      const okAlert = new Alert();
+      okAlert.title = "Session Saved!";
+      okAlert.message = "Your Movistar session token has been saved to iOS Keychain. The widget will now load your data.";
+      okAlert.addAction("OK");
+      await okAlert.presentAlert();
+      return pid;
+    } else {
+      const failAlert = new Alert();
+      failAlert.title = "Invalid Token";
+      failAlert.message = "Could not find a valid 'p_id' in the provided text. Make sure you copy the entire URL from Safari while logged in.";
+      failAlert.addAction("OK");
+      await failAlert.presentAlert();
+    }
+  }
+  return null;
+}
+
 async function presentInteractiveLogin() {
   const wv = new WebView();
   await wv.loadURL("https://mi.movistar.com.mx/login");
 
-  // Present full webview modal to solve reCAPTCHA and log in
-  // Check URL every 1 second for session token redirection
+  // Wait for page to initialize and inject an in-app visual helper banner
+  try {
+    await wv.waitForLoad();
+    const injectBannerScript = `
+      (() => {
+        if (document.getElementById('agy-movistar-helper')) return;
+        const b = document.createElement('div');
+        b.id = 'agy-movistar-helper';
+        b.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#00A9E0;color:#ffffff;padding:12px 14px;text-align:center;font-family:-apple-system,sans-serif;font-size:13px;font-weight:600;z-index:99999999;box-shadow:0 2px 10px rgba(0,0,0,0.3);';
+        b.innerHTML = '📱 <b>Mi Movistar Widget:</b> Inicia sesión abajo. En cuanto entres a tus consumos, pulsa <b>Listo (Done)</b> arriba para activar tu widget.';
+        document.body.prepend(b);
+      })()
+    `;
+    await wv.evaluateJavaScript(injectBannerScript);
+  } catch (_) {}
+
+  // Present the modal webview to the user
+  await wv.present(false);
+
+  // Once dismissed by the user, read the final state of the webview
   let capturedToken = null;
-  const timerScript = `
-    (() => {
-      const urlParams = new URLSearchParams(window.location.search);
-      const pid = urlParams.get('p_id');
-      if (pid) return pid;
+  try {
+    capturedToken = await wv.evaluateJavaScript(`
+      (() => {
+        const urlParams = new URLSearchParams(window.location.search);
+        const pid = urlParams.get('p_id');
+        if (pid) return pid;
 
-      // Check localStorage for ec_auth or p_id
-      try {
-        const stored = localStorage.getItem('p_id') || localStorage.getItem('ec_auth');
-        if (stored) return stored;
-      } catch (e) {}
+        try {
+          const stored = localStorage.getItem('p_id') || localStorage.getItem('ec_auth');
+          if (stored) return stored;
+        } catch (e) {}
 
-      return null;
-    })()
-  `;
+        return null;
+      })()
+    `);
+  } catch (e) {
+    console.warn("Could not evaluate JavaScript after modal dismiss: " + e.message);
+  }
 
-  // Start polling in background while presenting
-  const checkInterval = 1000;
-  const maxAttempts = 120; // 2 minutes
-  let attempts = 0;
+  // Fallback: check window.location.href
+  if (!capturedToken) {
+    try {
+      const currentUrl = await wv.evaluateJavaScript("window.location.href");
+      capturedToken = extractPid(currentUrl);
+    } catch (_) {}
+  }
 
-  const pollPromise = (async () => {
-    while (attempts < maxAttempts) {
-      await new Promise(r => setTimeout(r, checkInterval));
-      attempts++;
-      try {
-        const token = await wv.evaluateJavaScript(timerScript);
-        if (token && typeof token === "string" && token.length > 10) {
-          capturedToken = token;
-          break;
-        }
-      } catch (_) {}
-    }
-    return capturedToken;
-  })();
-
-  await Promise.race([wv.present(false), pollPromise]);
-
-  if (capturedToken) {
+  if (capturedToken && capturedToken.length > 10) {
     Keychain.set("MOVISTAR_TOKEN", capturedToken);
     const successAlert = new Alert();
+    successAlert.title = "Login Successful!";
+    successAlert.message = "Your Movistar session has been saved securely to iOS Keychain. Your widget will now update.";
+    successAlert.addAction("OK");
+    await successAlert.presentAlert();
+    return capturedToken;
+  } else {
+    const notFoundAlert = new Alert();
+    notFoundAlert.title = "Session Not Detected";
+    notFoundAlert.message = "You can also log in directly in Safari, copy the URL from Safari's address bar (https://mi.movistar.com.mx/consumptions?p_id=...), and use Option 2 ('Paste URL from Safari').";
+    notFoundAlert.addAction("OK");
+    await notFoundAlert.presentAlert();
+  }
+
+  return null;
+}
     successAlert.title = "Login Successful!";
     successAlert.message = "Your Movistar session has been saved securely to iOS Keychain.";
     successAlert.addAction("OK");
@@ -450,7 +514,9 @@ function createWidget(data) {
   const w = new ListWidget();
   w.backgroundColor = COLORS.bg;
   w.setPadding(12, 14, 12, 14);
-  w.url = "https://mi.movistar.com.mx/login";
+
+  const scriptName = (typeof Script !== "undefined" && Script.name && Script.name()) ? Script.name() : "Mi Movistar";
+  w.url = "scriptable:///run?scriptName=" + encodeURIComponent(scriptName);
 
   if (!data) {
     const errorStack = w.addStack();
