@@ -232,15 +232,6 @@ async function presentInteractiveLogin() {
 
   return null;
 }
-    successAlert.title = "Login Successful!";
-    successAlert.message = "Your Movistar session has been saved securely to iOS Keychain.";
-    successAlert.addAction("OK");
-    await successAlert.presentAlert();
-    return capturedToken;
-  }
-
-  return null;
-}
 
 // ============================================================================
 // DATA FETCHING & AES-256-GCM DECRYPTION
