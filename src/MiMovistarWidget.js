@@ -320,23 +320,19 @@ async function fetchMovistarData(token) {
       const wv = new WebView();
       await wv.loadURL("https://mi.movistar.com.mx/login");
       const script = `
-        (async () => {
-          try {
-            const res = await fetch("https://mi.movistar.com.mx/consumptions-controller/datos-iniciales", {
-              method: "GET",
-              headers: {
-                "Authorization": "${token}",
-                "Content-Type": "application/json"
-              }
-            });
-            return await res.text();
-          } catch (err) {
-            return JSON.stringify({ error: err.message });
+        fetch("https://mi.movistar.com.mx/consumptions-controller/datos-iniciales", {
+          method: "GET",
+          headers: {
+            "Authorization": "${token}",
+            "Content-Type": "application/json"
           }
-        })()
+        })
+        .then(r => r.text())
+        .then(t => completion(t))
+        .catch(err => completion(JSON.stringify({ error: err.message })));
       `;
-      const resText = await wv.evaluateJavaScript(script);
-      if (resText && resText.trim().startsWith("{")) {
+      const resText = await wv.evaluateJavaScript(script, true);
+      if (resText && typeof resText === "string" && resText.trim().startsWith("{")) {
         responseJson = JSON.parse(resText);
       }
     } catch (wvErr) {
@@ -371,20 +367,30 @@ async function decryptMovistarPayload(ciphertext, guardString) {
     return new TextDecoder().decode(decrypted);
   }
 
-  // Fallback to headless WebView evaluation
+  // Fallback to headless WebView evaluation using Scriptable's completion callback
   const wv = new WebView();
+  await wv.loadURL("https://mi.movistar.com.mx/login");
   const script = `
     (async () => {
-      const pad = s => (s + '='.repeat((4 - (s.length % 4)) % 4)).replace(/-/g, '+').replace(/_/g, '/');
-      const keyBytes = Uint8Array.from(atob(pad("${guardString}")), c => c.charCodeAt(0));
-      const iv = Uint8Array.from(atob(pad("${ivB64}")), c => c.charCodeAt(0));
-      const encData = Uint8Array.from(atob(pad("${encB64}")), c => c.charCodeAt(0));
-      const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['decrypt']);
-      const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv, tagLength: 128 }, key, encData);
-      return new TextDecoder().decode(decrypted);
-    })()
+      try {
+        const pad = s => (s + '='.repeat((4 - (s.length % 4)) % 4)).replace(/-/g, '+').replace(/_/g, '/');
+        const keyBytes = Uint8Array.from(atob(pad("${guardString}")), c => c.charCodeAt(0));
+        const iv = Uint8Array.from(atob(pad("${ivB64}")), c => c.charCodeAt(0));
+        const encData = Uint8Array.from(atob(pad("${encB64}")), c => c.charCodeAt(0));
+        const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['decrypt']);
+        const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv, tagLength: 128 }, key, encData);
+        completion(new TextDecoder().decode(decrypted));
+      } catch (err) {
+        completion(JSON.stringify({ error: err.message }));
+      }
+    })();
   `;
-  return await wv.evaluateJavaScript(script);
+  const result = await wv.evaluateJavaScript(script, true);
+  if (typeof result === "string" && result.startsWith('{"error":')) {
+    const parsedErr = JSON.parse(result);
+    throw new Error("Decryption failed: " + parsedErr.error);
+  }
+  return result;
 }
 
 function formatMovistarData(raw) {
