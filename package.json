@@ -1,0 +1,22 @@
+{
+  "name": "movistar-widget-ios",
+  "version": "1.0.0",
+  "description": "iOS Scriptable widget for real-time mobile data consumption, daily budget, and plan balances for Movistar México",
+  "main": "src/MiMovistarWidget.js",
+  "scripts": {
+    "test": "node --test test/test_decrypt.mjs",
+    "probe": "node test/probe_movistar.mjs"
+  },
+  "keywords": [
+    "scriptable",
+    "ios",
+    "widget",
+    "movistar",
+    "movistar-mexico",
+    "data-consumption",
+    "ios-widget"
+  ],
+  "author": "Rafael Vázquez",
+  "license": "MIT",
+  "type": "module"
+}
