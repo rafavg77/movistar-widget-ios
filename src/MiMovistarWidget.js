@@ -89,9 +89,13 @@ async function main() {
 
 function extractPid(input) {
   if (!input) return null;
-  const match = input.match(/[?&]p_id=([^&#\s]+)/);
+  const trimmed = input.trim();
+  const match = trimmed.match(/[?&]p_id=([^&#\s]+)/);
   if (match) return decodeURIComponent(match[1]);
-  return input.trim();
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+    return null; // URL without p_id is invalid
+  }
+  return trimmed;
 }
 
 async function getOrPromptSession() {
@@ -109,12 +113,19 @@ async function getOrPromptSession() {
 
   let token = Keychain.contains("MOVISTAR_TOKEN") ? Keychain.get("MOVISTAR_TOKEN") : CONFIG.token;
 
+  // Sanitize: remove any legacy invalid tokens (such as raw URLs saved by mistake)
+  if (token && (token.startsWith("http://") || token.startsWith("https://") || token.length < 15)) {
+    console.warn("Clearing invalid legacy token from Keychain: " + token);
+    Keychain.remove("MOVISTAR_TOKEN");
+    token = null;
+  }
+
   if (!token && !config.runsInWidget) {
     const alert = new Alert();
     alert.title = "Mi Movistar Setup";
-    alert.message = "To display your data consumption, the widget needs your Movistar session token. Choose how to sign in:";
-    alert.addAction("1. Web Login (In-App)");
-    alert.addAction("2. Paste URL from Safari (Fastest)");
+    alert.message = "Choose an option to sign in and activate your widget:";
+    alert.addAction("1. Web Login (In-App — Recommended)");
+    alert.addAction("2. Paste Safari URL (With p_id)");
     alert.addAction("3. Test with Mock Data");
     alert.addCancelAction("Cancel");
 
@@ -135,7 +146,7 @@ async function getOrPromptSession() {
 async function promptPasteUrl() {
   const pasteAlert = new Alert();
   pasteAlert.title = "Paste Safari URL";
-  pasteAlert.message = "If you already logged into Mi Movistar in Safari, copy the URL from Safari's address bar (it looks like https://mi.movistar.com.mx/consumptions?p_id=...) and paste it below:";
+  pasteAlert.message = "Make sure the copied URL contains '?p_id=' (for example: https://mi.movistar.com.mx/consumptions?p_id=...):\n\nIf Safari doesn't show '?p_id=', use Option 1 (Web Login) instead.";
   pasteAlert.addTextField("Paste URL or p_id here", "");
   pasteAlert.addAction("Save");
   pasteAlert.addCancelAction("Cancel");
@@ -147,14 +158,14 @@ async function promptPasteUrl() {
       Keychain.set("MOVISTAR_TOKEN", pid);
       const okAlert = new Alert();
       okAlert.title = "Session Saved!";
-      okAlert.message = "Your Movistar session token has been saved to iOS Keychain. The widget will now load your data.";
+      okAlert.message = "Session token saved to Keychain. The widget will now load your consumption.";
       okAlert.addAction("OK");
       await okAlert.presentAlert();
       return pid;
     } else {
       const failAlert = new Alert();
-      failAlert.title = "Invalid Token";
-      failAlert.message = "Could not find a valid 'p_id' in the provided text. Make sure you copy the entire URL from Safari while logged in.";
+      failAlert.title = "Invalid URL / Token";
+      failAlert.message = "The text you pasted does not contain a session token (?p_id=...). Please use Option 1 ('Web Login') to sign in directly inside the app.";
       failAlert.addAction("OK");
       await failAlert.presentAlert();
     }
@@ -166,39 +177,79 @@ async function presentInteractiveLogin() {
   const wv = new WebView();
   await wv.loadURL("https://mi.movistar.com.mx/login");
 
-  // Wait for page to initialize and inject an in-app visual helper banner
+  // Inject helper banner and AJAX response interceptor
   try {
     await wv.waitForLoad();
-    const injectBannerScript = `
+    const injectInterceptorScript = `
       (() => {
-        if (document.getElementById('agy-movistar-helper')) return;
-        const b = document.createElement('div');
-        b.id = 'agy-movistar-helper';
-        b.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#00A9E0;color:#ffffff;padding:12px 14px;text-align:center;font-family:-apple-system,sans-serif;font-size:13px;font-weight:600;z-index:99999999;box-shadow:0 2px 10px rgba(0,0,0,0.3);';
-        b.innerHTML = '📱 <b>Mi Movistar Widget:</b> Inicia sesión abajo. En cuanto entres a tus consumos, pulsa <b>Listo (Done)</b> arriba para activar tu widget.';
-        document.body.prepend(b);
+        // In-app visual banner
+        if (!document.getElementById('agy-movistar-helper')) {
+          const b = document.createElement('div');
+          b.id = 'agy-movistar-helper';
+          b.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#00A9E0;color:#ffffff;padding:14px 16px;text-align:center;font-family:-apple-system,sans-serif;font-size:13px;font-weight:600;z-index:99999999;box-shadow:0 3px 12px rgba(0,0,0,0.4);';
+          b.innerHTML = '📱 <b>Mi Movistar:</b> Inicia sesión abajo. En cuanto entres, pulsa <b>Listo (Done)</b> arriba para activar tu widget.';
+          document.body.prepend(b);
+        }
+
+        // Intercept XMLHttpRequest to capture authentication token immediately
+        const origOpen = XMLHttpRequest.prototype.open;
+        const origSend = XMLHttpRequest.prototype.send;
+
+        XMLHttpRequest.prototype.open = function(method, url) {
+          this._agyUrl = url;
+          return origOpen.apply(this, arguments);
+        };
+
+        XMLHttpRequest.prototype.send = function() {
+          this.addEventListener('load', function() {
+            try {
+              if (this._agyUrl && this._agyUrl.includes('authenticate')) {
+                const data = JSON.parse(this.responseText);
+                if (data && data.content && data.content.ec_auth) {
+                  window.__CAPTURED_PID__ = data.content.ec_auth;
+                  localStorage.setItem('MOVISTAR_PID', data.content.ec_auth);
+                  const banner = document.getElementById('agy-movistar-helper');
+                  if (banner) {
+                    banner.style.background = '#5BC500';
+                    banner.innerHTML = '✅ <b>¡Sesión iniciada!</b> Pulsa <b>Listo (Done)</b> arriba a la izquierda para continuar.';
+                  }
+                }
+              }
+            } catch (_) {}
+          });
+          return origSend.apply(this, arguments);
+        };
+
+        // Watch URL changes
+        setInterval(() => {
+          try {
+            const p = new URLSearchParams(window.location.search).get('p_id');
+            if (p) {
+              window.__CAPTURED_PID__ = p;
+              localStorage.setItem('MOVISTAR_PID', p);
+            }
+          } catch (_) {}
+        }, 500);
       })()
     `;
-    await wv.evaluateJavaScript(injectBannerScript);
+    await wv.evaluateJavaScript(injectInterceptorScript);
   } catch (_) {}
 
   // Present the modal webview to the user
   await wv.present(false);
 
-  // Once dismissed by the user, read the final state of the webview
+  // Once dismissed, retrieve the intercepted token
   let capturedToken = null;
   try {
     capturedToken = await wv.evaluateJavaScript(`
       (() => {
-        const urlParams = new URLSearchParams(window.location.search);
-        const pid = urlParams.get('p_id');
-        if (pid) return pid;
-
+        if (window.__CAPTURED_PID__) return window.__CAPTURED_PID__;
         try {
-          const stored = localStorage.getItem('p_id') || localStorage.getItem('ec_auth');
+          const stored = localStorage.getItem('MOVISTAR_PID') || localStorage.getItem('p_id') || localStorage.getItem('ec_auth');
           if (stored) return stored;
-        } catch (e) {}
-
+        } catch (_) {}
+        const p = new URLSearchParams(window.location.search).get('p_id');
+        if (p) return p;
         return null;
       })()
     `);
@@ -225,7 +276,7 @@ async function presentInteractiveLogin() {
   } else {
     const notFoundAlert = new Alert();
     notFoundAlert.title = "Session Not Detected";
-    notFoundAlert.message = "You can also log in directly in Safari, copy the URL from Safari's address bar (https://mi.movistar.com.mx/consumptions?p_id=...), and use Option 2 ('Paste URL from Safari').";
+    notFoundAlert.message = "Please make sure you submit the login form and see your dashboard before tapping 'Done'.";
     notFoundAlert.addAction("OK");
     await notFoundAlert.presentAlert();
   }
@@ -239,17 +290,62 @@ async function presentInteractiveLogin() {
 
 async function fetchMovistarData(token) {
   const url = "https://mi.movistar.com.mx/consumptions-controller/datos-iniciales";
-  const req = new Request(url);
-  req.method = "GET";
-  req.headers = {
-    "Authorization": token,
-    "Content-Type": "application/json",
-    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
-  };
+  let responseJson = null;
 
-  const responseJson = await req.loadJSON();
+  // Try direct Request with loadString
+  try {
+    const req = new Request(url);
+    req.method = "GET";
+    req.headers = {
+      "Authorization": token,
+      "Content-Type": "application/json",
+      "Referer": "https://mi.movistar.com.mx/consumptions",
+      "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
+    };
+
+    const text = await req.loadString();
+    if (text && text.trim().startsWith("{")) {
+      responseJson = JSON.parse(text);
+    } else {
+      console.warn("Direct request returned non-JSON: " + (text ? text.slice(0, 100) : "empty"));
+    }
+  } catch (e) {
+    console.warn("Direct request error: " + e.message);
+  }
+
+  // Fallback: Query via headless WebView (bypasses Cloudflare challenge)
   if (!responseJson || !responseJson.content) {
-    throw new Error("Invalid response received from Movistar server.");
+    console.log("Querying consumption data via headless WebView...");
+    try {
+      const wv = new WebView();
+      await wv.loadURL("https://mi.movistar.com.mx/login");
+      const script = `
+        (async () => {
+          try {
+            const res = await fetch("https://mi.movistar.com.mx/consumptions-controller/datos-iniciales", {
+              method: "GET",
+              headers: {
+                "Authorization": "${token}",
+                "Content-Type": "application/json"
+              }
+            });
+            return await res.text();
+          } catch (err) {
+            return JSON.stringify({ error: err.message });
+          }
+        })()
+      `;
+      const resText = await wv.evaluateJavaScript(script);
+      if (resText && resText.trim().startsWith("{")) {
+        responseJson = JSON.parse(resText);
+      }
+    } catch (wvErr) {
+      console.warn("Headless WebView error: " + wvErr.message);
+    }
+  }
+
+  if (!responseJson || !responseJson.content) {
+    throw new Error("Unable to read consumption data from Movistar. Your session may have expired; please re-authenticate using Option 1 (Web Login).");
   }
 
   const decryptedText = await decryptMovistarPayload(responseJson.content, CONFIG.guardString);
